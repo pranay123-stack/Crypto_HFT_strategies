@@ -6,14 +6,10 @@
 #include <curl/curl.h>
 #include <json/json.h>
 #include <fstream>
-#include <mutex>
-#include <memory>
 
 class Logger {
 public:
     static void log(const std::string& message) {
-        static std::shared_ptr<std::mutex> log_mutex = std::make_shared<std::mutex>();
-        std::lock_guard<std::mutex> lock(*log_mutex);
         std::ofstream logFile("hft_log.txt", std::ios_base::app);
         logFile << message << std::endl;
         std::cout << message << std::endl;
@@ -25,6 +21,7 @@ struct Candle {
     double close;
     double high;
     double low;
+    double volume;
 };
 
 class MarketData {
@@ -34,8 +31,8 @@ public:
         return size * nmemb;
     }
 
-    static std::shared_ptr<std::vector<Candle>> fetch_market_data() {
-        static std::shared_ptr<std::vector<Candle>> candles = std::make_shared<std::vector<Candle>>();
+    static std::vector<Candle> fetch_market_data() {
+        std::vector<Candle> candles;
         CURL* curl;
         CURLcode res;
         std::string readBuffer;
@@ -55,9 +52,8 @@ public:
                 std::string parseErrors;
 
                 if (Json::parseFromStream(reader, s, &jsonData, &parseErrors)) {
-                    candles->clear();
                     for (const auto& item : jsonData) {
-                        candles->push_back({std::stod(item[1].asString()), std::stod(item[4].asString()), std::stod(item[2].asString()), std::stod(item[3].asString())});
+                        candles.push_back({std::stod(item[1].asString()), std::stod(item[4].asString()), std::stod(item[2].asString()), std::stod(item[3].asString()), std::stod(item[5].asString())});
                     }
                 }
             }
@@ -66,27 +62,45 @@ public:
     }
 };
 
-class PositionManagement {
+class RiskManagement {
 private:
-    std::shared_ptr<double> account_balance;
+    double max_drawdown;
     double risk_per_trade;
 
 public:
-    PositionManagement(double initial_balance, double risk_percent) {
-        account_balance = std::make_shared<double>(initial_balance);
-        risk_per_trade = risk_percent;
+    RiskManagement(double drawdown, double risk) : max_drawdown(drawdown), risk_per_trade(risk) {}
+
+    bool check_risk(double account_balance, double initial_balance) {
+        return account_balance >= (initial_balance * (1 - max_drawdown));
     }
 
+    double get_risk_per_trade() const {
+        return risk_per_trade;
+    }
+};
+
+class PositionManagement {
+private:
+    double account_balance;
+    RiskManagement risk_manager;
+
+public:
+    PositionManagement(double initial_balance, double risk_percent, double drawdown) : account_balance(initial_balance), risk_manager(drawdown, risk_percent) {}
+
     double get_dynamic_position_size() {
-        return ((*account_balance) * risk_per_trade) / 100.0;
+        return (account_balance * risk_manager.get_risk_per_trade()) / 100.0;
     }
 
     void update_balance(double profit_or_loss) {
-        *account_balance += profit_or_loss;
+        account_balance += profit_or_loss;
+    }
+
+    bool check_risk(double initial_balance) {
+        return risk_manager.check_risk(account_balance, initial_balance);
     }
 
     double get_balance() const {
-        return *account_balance;
+        return account_balance;
     }
 };
 
@@ -96,41 +110,50 @@ private:
     int fast_ema_period = 3;
     int slow_ema_period = 8;
     int atr_period = 14;
-    double risk_reward_ratio = 1.2;
+    double risk_reward_ratio = 1.5;
+    double volume_threshold = 1000.0;
+    double initial_balance;
 
 public:
-    HFTStrategy(double initial_balance, double risk_percent) : position_manager(initial_balance, risk_percent) {}
+    HFTStrategy(double initial_balance, double risk_percent, double drawdown) : position_manager(initial_balance, risk_percent, drawdown) {
+        this->initial_balance = initial_balance;
+    }
 
-    void trade(std::shared_ptr<std::vector<Candle>> candles) {
-        if (candles->size() < slow_ema_period) return;
-
+    void trade(const std::vector<Candle>& candles) {
         std::vector<double> closes;
-        for (const auto& candle : *candles) {
+        for (const auto& candle : candles) {
             closes.push_back(candle.close);
         }
 
         for (size_t i = slow_ema_period; i < closes.size(); ++i) {
+            if (!position_manager.check_risk(initial_balance)) {
+                Logger::log("Risk limit reached. Stopping trading.");
+                break;
+            }
+
             double fast_ema = closes[i] * (2.0 / (fast_ema_period + 1)) + closes[i - 1] * (1 - (2.0 / (fast_ema_period + 1)));
             double slow_ema = closes[i] * (2.0 / (slow_ema_period + 1)) + closes[i - 1] * (1 - (2.0 / (slow_ema_period + 1)));
-            double atr = (candles->at(i).high - candles->at(i).low) * 1.5;
+            double atr = (candles[i].high - candles[i].low) * 1.5;
             double position_size = position_manager.get_dynamic_position_size();
             double stop_loss = 1.5 * atr;
             double take_profit = stop_loss * risk_reward_ratio;
 
-            if (fast_ema > slow_ema) {
-                Logger::log("Long position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] - stop_loss) + " | TP: " + std::to_string(closes[i] + take_profit));
-            } else if (fast_ema < slow_ema) {
-                Logger::log("Short position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] + stop_loss) + " | TP: " + std::to_string(closes[i] - take_profit));
+            if (candles[i].volume > volume_threshold) {
+                if (fast_ema > slow_ema) {
+                    Logger::log("Long position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] - stop_loss) + " | TP: " + std::to_string(closes[i] + take_profit));
+                } else if (fast_ema < slow_ema) {
+                    Logger::log("Short position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] + stop_loss) + " | TP: " + std::to_string(closes[i] - take_profit));
+                }
             }
         }
     }
 };
 
 int main() {
-    HFTStrategy strategy(10000.0, 0.5);
+    HFTStrategy strategy(10000.0, 0.5, 0.1); // 10% max drawdown
     auto candles = MarketData::fetch_market_data();
     
-    if (candles->empty()) {
+    if (candles.empty()) {
         Logger::log("Failed to retrieve data from Binance.");
         return 1;
     }
