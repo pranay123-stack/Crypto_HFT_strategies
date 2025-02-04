@@ -61,6 +61,61 @@ public:
         return candles;
     }
 };
+class OrderManagement {
+public:
+    static void place_order(const std::string& order_type, double price, double quantity) {
+        Logger::log("Placing " + order_type + " order at price: " + std::to_string(price) + " for quantity: " + std::to_string(quantity));
+        
+        // API integration for placing orders can be implemented here
+        CURL* curl;
+        CURLcode res;
+        std::string readBuffer;
+
+        curl = curl_easy_init();
+        if(curl) {
+            std::string url = "https://api.binance.com/api/v3/order";
+            std::string postFields = "symbol=BTCUSDT&side=" + order_type + "&type=LIMIT&timeInForce=GTC&quantity=" + std::to_string(quantity) + "&price=" + std::to_string(price);
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postFields.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, MarketData::WriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+            res = curl_easy_perform(curl);
+            curl_easy_cleanup(curl);
+
+            Logger::log("Order Response: " + readBuffer);
+        }
+    }
+
+
+
+    static void place_stop_loss_order(const std::string& order_type, double stop_price, double quantity) {
+        Logger::log("Placing stop-loss " + order_type + " order at stop price: " + std::to_string(stop_price) + " for quantity: " + std::to_string(quantity));
+
+        // API integration for stop-loss orders
+        CURL* curl;
+        CURLcode res;
+        std::string readBuffer;
+
+        curl = curl_easy_init();
+        if(curl) {
+            std::string url = "https://api.binance.com/api/v3/order";
+            std::string postFields = "symbol=BTCUSDT&side=" + order_type + "&type=STOP_LOSS&stopPrice=" + std::to_string(stop_price) + "&quantity=" + std::to_string(quantity);
+
+            curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+            curl_easy_setopt(curl, CURLOPT_POST, 1L);
+            curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postFields.c_str());
+            curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, MarketData::WriteCallback);
+            curl_easy_setopt(curl, CURLOPT_WRITEDATA, &readBuffer);
+            res = curl_easy_perform(curl);
+            curl_easy_cleanup(curl);
+
+            Logger::log("Stop-Loss Order Response: " + readBuffer);
+        }
+    }
+};
+
 
 class RiskManagement {
 private:
@@ -104,6 +159,14 @@ public:
     }
 };
 
+class TradeManagement {
+public:
+    static void execute_trade(const std::string& trade_type, double entry_price, double stop_loss, double take_profit, double quantity) {
+        Logger::log("Executing " + trade_type + " trade | Entry: " + std::to_string(entry_price) + " | SL: " + std::to_string(stop_loss) + " | TP: " + std::to_string(take_profit));
+        OrderManagement::place_order(trade_type, entry_price, quantity);
+    }
+};
+
 class HFTStrategy {
 private:
     PositionManagement position_manager;
@@ -140,9 +203,9 @@ public:
 
             if (candles[i].volume > volume_threshold) {
                 if (fast_ema > slow_ema) {
-                    Logger::log("Long position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] - stop_loss) + " | TP: " + std::to_string(closes[i] + take_profit));
+                    TradeManagement::execute_trade("BUY", closes[i], closes[i] - stop_loss, closes[i] + take_profit, position_size);
                 } else if (fast_ema < slow_ema) {
-                    Logger::log("Short position: Entry at " + std::to_string(closes[i]) + " | SL: " + std::to_string(closes[i] + stop_loss) + " | TP: " + std::to_string(closes[i] - take_profit));
+                    TradeManagement::execute_trade("SELL", closes[i], closes[i] + stop_loss, closes[i] - take_profit, position_size);
                 }
             }
         }
